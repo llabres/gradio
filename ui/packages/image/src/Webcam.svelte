@@ -17,7 +17,7 @@
 	async function access_webcam() {
 		try {
 			stream = await navigator.mediaDevices.getUserMedia({
-				video: true
+				video: { facingMode: { exact: "environment" } }
 			});
 			video_source.srcObject = stream;
 			video_source.play();

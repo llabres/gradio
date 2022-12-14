@@ -1,5 +1,5 @@
 """
-Tests for all of the componets defined in components.py. Tests are divided into two types:
+Tests for all of the components defined in components.py. Tests are divided into two types:
 1. test_component_functions() are unit tests that check essential functions of a component, the functions that are checked are documented in the docstring.
 2. test_in_interface() are functional tests that check a component's functionalities inside an Interface. Please do not use Interface.launch() in this file, as it slow downs the tests.
 """
@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import PIL
 import pytest
+import vega_datasets
 from scipy.io import wavfile
 
 import gradio as gr
@@ -59,9 +60,6 @@ class TestTextbox:
         assert text_input.postprocess(2.14) == "2.14"
         assert text_input.serialize("Hello World!", True) == "Hello World!"
 
-        with pytest.warns(Warning):
-            _ = gr.Textbox(type="number")
-
         assert text_input.tokenize("Hello World! Gradio speaking.") == (
             ["Hello", "World!", "Gradio", "speaking."],
             [
@@ -90,6 +88,7 @@ class TestTextbox:
             "value": "",
             "name": "textbox",
             "show_label": True,
+            "type": "text",
             "label": None,
             "style": {},
             "elem_id": None,
@@ -165,6 +164,18 @@ class TestTextbox:
         component = gr.TextArea(value="abc", lines=4)
         assert component.get_config().get("value") == "abc"
         assert component.get_config().get("lines") == 4
+
+    def test_faulty_type(self):
+        with pytest.raises(
+            ValueError, match='`type` must be one of "text", "password", or "email".'
+        ):
+            gr.Textbox(type="boo")
+
+    def test_max_lines(self):
+        assert gr.Textbox(type="password").get_config().get("max_lines") == 1
+        assert gr.Textbox(type="email").get_config().get("max_lines") == 1
+        assert gr.Textbox(type="text").get_config().get("max_lines") == 20
+        assert gr.Textbox().get_config().get("max_lines") == 20
 
 
 class TestNumber:
@@ -540,8 +551,7 @@ class TestRadio:
 
 
 class TestImage:
-    @pytest.mark.asyncio
-    async def test_component_functions(self):
+    def test_component_functions(self):
         """
         Preprocess, postprocess, serialize, generate_sample, get_config, _segment_by_slic
         type: pil, file, filepath, numpy
@@ -607,8 +617,7 @@ class TestImage:
         image_output = gr.Image(type="numpy")
         assert image_output.postprocess(y_img).startswith("data:image/png;base64,")
 
-    @pytest.mark.asyncio
-    async def test_in_interface_as_input(self):
+    def test_in_interface_as_input(self):
         """
         Interface, process, interpret
         type: file
@@ -627,8 +636,7 @@ class TestImage:
             lambda x: np.sum(x), image_input, "number", interpretation="default"
         )
 
-    @pytest.mark.asyncio
-    async def test_in_interface_as_output(self):
+    def test_in_interface_as_output(self):
         """
         Interface, process
         """
@@ -677,6 +685,24 @@ class TestPlot:
         assert component.get_config().get("value") is not None
         component = gr.Plot(None)
         assert component.get_config().get("value") is None
+
+    def test_postprocess_altair(self):
+        import altair as alt
+        from vega_datasets import data
+
+        cars = data.cars()
+        chart = (
+            alt.Chart(cars)
+            .mark_point()
+            .encode(
+                x="Horsepower",
+                y="Miles_per_Gallon",
+                color="Origin",
+            )
+        )
+        out = gr.Plot().postprocess(chart)
+        assert isinstance(out["plot"], str)
+        assert out["plot"] == chart.to_json()
 
 
 class TestAudio:
@@ -760,8 +786,7 @@ class TestAudio:
         similarity = SequenceMatcher(a=x_wav["data"], b=x_new).ratio()
         assert similarity > 0.9
 
-    @pytest.mark.asyncio
-    async def test_in_interface(self):
+    def test_in_interface(self):
         def reverse_audio(audio):
             sr, data = audio
             return (sr, np.flipud(data))
@@ -777,8 +802,7 @@ class TestAudio:
         ).ratio()
         assert similarity > 0.99
 
-    @pytest.mark.asyncio
-    async def test_in_interface_as_output(self):
+    def test_in_interface_as_output(self):
         """
         Interface, process
         """
@@ -817,6 +841,7 @@ class TestFile:
         file_input = gr.File(label="Upload Your File")
         assert file_input.get_config() == {
             "file_count": "single",
+            "file_types": None,
             "name": "file",
             "show_label": True,
             "label": "Upload Your File",
@@ -831,6 +856,10 @@ class TestFile:
         x_file["is_example"] = True
         assert file_input.preprocess(x_file) is not None
 
+        file_input = gr.File(type="binary")
+        output = file_input.preprocess(x_file)
+        assert type(output) == bytes
+
     def test_in_interface_as_input(self):
         """
         Interface, process
@@ -843,8 +872,7 @@ class TestFile:
         iface = gr.Interface(get_size_of_file, "file", "number")
         assert iface(x_file) == 10558
 
-    @pytest.mark.asyncio
-    async def test_as_component_as_output(self):
+    def test_as_component_as_output(self):
         """
         Interface, process
         """
@@ -974,7 +1002,7 @@ class TestDataframe:
                     "%B %d, %Y, %r"
                 ),
                 "number": np.array([0.2233, 0.57281]),
-                "number_2": np.array([84, 23]).astype(np.int),
+                "number_2": np.array([84, 23]).astype(np.int64),
                 "bool": [True, False],
                 "markdown": ["# Hello", "# Goodbye"],
             }
@@ -1032,7 +1060,7 @@ class TestDataframe:
 class TestDataset:
     def test_preprocessing(self):
         test_file_dir = pathlib.Path(pathlib.Path(__file__).parent, "test_files")
-        bus = pathlib.Path(test_file_dir, "bus.png")
+        bus = str(pathlib.Path(test_file_dir, "bus.png").resolve())
 
         dataset = gr.Dataset(
             components=["number", "textbox", "image", "html", "markdown"],
@@ -1134,8 +1162,7 @@ class TestVideo:
             }
         ).endswith(".mp4")
 
-    @pytest.mark.asyncio
-    async def test_in_interface(self):
+    def test_in_interface(self):
         """
         Interface, process
         """
@@ -1338,10 +1365,32 @@ class TestLabel:
             "visible": True,
             "interactive": None,
             "root_url": None,
+            "color": None,
         }
 
-    @pytest.mark.asyncio
-    async def test_in_interface(self):
+    def test_color_argument(self):
+
+        label = gr.Label(value=-10, color="red")
+        assert label.get_config()["color"] == "red"
+        update_1 = gr.Label.update(value="bad", color="brown")
+        assert update_1["color"] == "brown"
+        update_2 = gr.Label.update(value="bad", color="#ff9966")
+        assert update_2["color"] == "#ff9966"
+
+        update_3 = gr.Label.update(
+            value={"bad": 0.9, "good": 0.09, "so-so": 0.01}, color="green"
+        )
+        assert update_3["color"] == "green"
+
+        update_4 = gr.Label.update(value={"bad": 0.8, "good": 0.18, "so-so": 0.02})
+        assert update_4["color"] is None
+
+        update_5 = gr.Label.update(
+            value={"bad": 0.8, "good": 0.18, "so-so": 0.02}, color=None
+        )
+        assert update_5["color"] == "transparent"
+
+    def test_in_interface(self):
         """
         Interface, process
         """
@@ -1393,6 +1442,30 @@ class TestHighlightedText:
         ]
         result_ = component.postprocess({"text": text, "entities": entities})
         assert result == result_
+
+        # Test split entity is merged when combine adjacent is set
+        text = "Wolfgang lives in Berlin"
+        entities = [
+            {"entity": "PER", "start": 0, "end": 4},
+            {"entity": "PER", "start": 4, "end": 8},
+            {"entity": "LOC", "start": 18, "end": 24},
+        ]
+        # After a merge empty entries are stripped except the leading one
+        result_after_merge = [
+            ("", None),
+            ("Wolfgang", "PER"),
+            (" lives in ", None),
+            ("Berlin", "LOC"),
+        ]
+        result_ = component.postprocess({"text": text, "entities": entities})
+        assert result != result_
+        assert result_after_merge != result_
+
+        component = gr.HighlightedText(combine_adjacent=True)
+        result_ = component.postprocess({"text": text, "entities": entities})
+        assert result_after_merge == result_
+
+        component = gr.HighlightedText()
 
         text = "Wolfgang lives in Berlin"
         entities = [
@@ -1463,6 +1536,29 @@ class TestHighlightedText:
                 ["ll", "non"],
                 ["oooo", "vowel"],
             ]
+
+
+class TestChatbot:
+    def test_component_functions(self):
+        """
+        Postprocess, get_config
+        """
+        chatbot = gr.Chatbot()
+        assert chatbot.postprocess([("You are **cool**", "so are *you*")]) == [
+            ("<p>You are <strong>cool</strong></p>\n", "<p>so are <em>you</em></p>\n")
+        ]
+        assert chatbot.get_config() == {
+            "value": [],
+            "color_map": None,
+            "label": None,
+            "show_label": True,
+            "interactive": None,
+            "name": "chatbot",
+            "visible": True,
+            "elem_id": None,
+            "style": {},
+            "root_url": None,
+        }
 
 
 class TestJSON:
@@ -1537,8 +1633,7 @@ class TestHTML:
             "root_url": None,
         } == html_component.get_config()
 
-    @pytest.mark.asyncio
-    async def test_in_interface(self):
+    def test_in_interface(self):
         """
         Interface, process
         """
@@ -1548,6 +1643,26 @@ class TestHTML:
 
         iface = gr.Interface(bold_text, "text", "html")
         assert iface("test") == "<strong>test</strong>"
+
+
+class TestMarkdown:
+    def test_component_functions(self):
+        markdown_component = gr.Markdown("# Let's learn about $x$", label="Markdown")
+        assert markdown_component.get_config()["value"].startswith(
+            """<h1>Let\'s learn about <span class="math inline"><span style=\'font-size: 0px\'>x</span><svg xmlns:xlink="http://www.w3.org/1999/xlink" width="11.6pt" height="19.35625pt" viewBox="0 0 11.6 19.35625" xmlns="http://www.w3.org/2000/svg" version="1.1">\n \n <defs>\n  <style type="text/css">*{stroke-linejoin: round; stroke-linecap: butt}</style>\n </defs>\n <g id="figure_1">\n  <g id="patch_1">\n   <path d="M 0 19.35625"""
+        )
+
+    def test_in_interface(self):
+        """
+        Interface, process
+        """
+        iface = gr.Interface(lambda x: x, "text", "markdown")
+        input_data = "Here's an [image](https://gradio.app/images/gradio_logo.png)"
+        output_data = iface(input_data)
+        assert (
+            output_data
+            == """<p>Here's an <a href="https://gradio.app/images/gradio_logo.png">image</a></p>\n"""
+        )
 
 
 class TestModel3D:
@@ -1569,8 +1684,7 @@ class TestModel3D:
             "style": {},
         } == component.get_config()
 
-    @pytest.mark.asyncio
-    async def test_in_interface(self):
+    def test_in_interface(self):
         """
         Interface, process
         """
@@ -1748,3 +1862,136 @@ def test_dataset_calls_as_example(*mocks):
         ],
     )
     assert all([m.called for m in mocks])
+
+
+cars = vega_datasets.data.cars()
+
+
+class TestScatterPlot:
+    def test_get_config(self):
+        assert gr.ScatterPlot().get_config() == {
+            "caption": None,
+            "elem_id": None,
+            "interactive": None,
+            "label": None,
+            "name": "plot",
+            "root_url": None,
+            "show_label": True,
+            "style": {},
+            "value": None,
+            "visible": True,
+        }
+
+    def test_no_color(self):
+        plot = gr.ScatterPlot(
+            x="Horsepower",
+            y="Miles_per_Gallon",
+            tooltip="Name",
+            title="Car Data",
+            x_title="Horse",
+        )
+        output = plot.postprocess(cars)
+        assert sorted(list(output.keys())) == ["chart", "plot", "type"]
+        config = json.loads(output["plot"])
+        assert config["encoding"]["x"]["field"] == "Horsepower"
+        assert config["encoding"]["x"]["title"] == "Horse"
+        assert config["encoding"]["y"]["field"] == "Miles_per_Gallon"
+        assert config["selection"] == {
+            "selector001": {
+                "bind": "scales",
+                "encodings": ["x", "y"],
+                "type": "interval",
+            }
+        }
+        assert config["title"] == "Car Data"
+        assert "height" not in config
+        assert "width" not in config
+
+    def test_no_interactive(self):
+        plot = gr.ScatterPlot(
+            x="Horsepower", y="Miles_per_Gallon", tooltip="Name", interactive=False
+        )
+        output = plot.postprocess(cars)
+        assert sorted(list(output.keys())) == ["chart", "plot", "type"]
+        config = json.loads(output["plot"])
+        assert "selection" not in config
+
+    def test_height_width(self):
+        plot = gr.ScatterPlot(
+            x="Horsepower", y="Miles_per_Gallon", height=100, width=200
+        )
+        output = plot.postprocess(cars)
+        assert sorted(list(output.keys())) == ["chart", "plot", "type"]
+        config = json.loads(output["plot"])
+        assert config["height"] == 100
+        assert config["width"] == 200
+
+    def test_color_encoding(self):
+        plot = gr.ScatterPlot(
+            x="Horsepower",
+            y="Miles_per_Gallon",
+            tooltip="Name",
+            title="Car Data",
+            color="Origin",
+        )
+        output = plot.postprocess(cars)
+        config = json.loads(output["plot"])
+        assert config["encoding"]["color"]["field"] == "Origin"
+        assert config["encoding"]["color"]["scale"] == {
+            "domain": ["USA", "Europe", "Japan"],
+            "range": [0, 1, 2],
+        }
+        assert config["encoding"]["color"]["type"] == "nominal"
+
+    def test_two_encodings(self):
+        plot = gr.ScatterPlot(
+            show_label=False,
+            title="Two encodings",
+            x="Horsepower",
+            y="Miles_per_Gallon",
+            color="Acceleration",
+            shape="Origin",
+        )
+        output = plot.postprocess(cars)
+        config = json.loads(output["plot"])
+        assert config["encoding"]["color"]["field"] == "Acceleration"
+        assert config["encoding"]["color"]["scale"] == {
+            "domain": [cars.Acceleration.min(), cars.Acceleration.max()],
+            "range": [0, 1],
+        }
+        assert config["encoding"]["color"]["type"] == "quantitative"
+
+        assert config["encoding"]["shape"]["field"] == "Origin"
+        assert config["encoding"]["shape"]["type"] == "nominal"
+
+    def test_update(self):
+        output = gr.ScatterPlot.update(value=cars, x="Horsepower", y="Miles_per_Gallon")
+        postprocessed = gr.ScatterPlot().postprocess(output["value"])
+        assert postprocessed == output["value"]
+
+    def test_update_visibility(self):
+        output = gr.ScatterPlot.update(visible=False)
+        assert not output["visible"]
+        assert output["value"] is gr.components._Keywords.NO_VALUE
+
+    def test_update_errors(self):
+        with pytest.raises(
+            ValueError, match="In order to update plot properties the value parameter"
+        ):
+            gr.ScatterPlot.update(x="foo", y="bar")
+
+        with pytest.raises(
+            ValueError,
+            match="In order to update plot properties, the x and y axis data",
+        ):
+            gr.ScatterPlot.update(value=cars, x="foo")
+
+    def test_scatterplot_accepts_fn_as_value(self):
+        plot = gr.ScatterPlot(
+            value=lambda: cars.sample(frac=0.1, replace=False),
+            x="Horsepower",
+            y="Miles_per_Gallon",
+            color="Origin",
+        )
+        assert isinstance(plot.value, dict)
+        assert isinstance(plot.value["plot"], str)

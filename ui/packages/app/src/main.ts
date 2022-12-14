@@ -38,6 +38,7 @@ interface Config {
 }
 
 let app_id: string | null = null;
+let app_mode = window.__gradio_mode__ === "app";
 
 async function reload_check(root: string) {
 	const result = await (await fetch(root + "app_id")).text();
@@ -152,7 +153,8 @@ function mount_app(
 			props: {
 				auth_message: config.auth_message,
 				root: config.root,
-				id
+				id,
+				app_mode
 			}
 		});
 	} else {
@@ -167,7 +169,13 @@ function mount_app(
 		new Blocks({
 			target: wrapper,
 			//@ts-ignore
-			props: { ...config, target: wrapper, id, autoscroll: autoscroll }
+			props: {
+				...config,
+				target: wrapper,
+				id,
+				autoscroll: autoscroll,
+				app_mode
+			}
 		});
 	}
 
@@ -184,6 +192,7 @@ function create_custom_element() {
 		root: ShadowRoot;
 		wrapper: HTMLDivElement;
 		_id: number;
+		theme: string;
 
 		constructor() {
 			super();
@@ -202,6 +211,7 @@ function create_custom_element() {
 			this.wrapper.style.position = "relative";
 			this.wrapper.style.width = "100%";
 			this.wrapper.style.minHeight = "100vh";
+			this.theme = "light";
 
 			window.__gradio_loader__[this._id] = new Loader({
 				target: this.wrapper,
@@ -214,6 +224,9 @@ function create_custom_element() {
 			});
 
 			this.root.append(this.wrapper);
+			if (window.__gradio_mode__ !== "website") {
+				this.theme = handle_darkmode(this.wrapper);
+			}
 		}
 
 		async connectedCallback() {
@@ -229,18 +242,22 @@ function create_custom_element() {
 
 			observer.observe(this.root, { childList: true });
 
+			const host = this.getAttribute("host");
 			const space = this.getAttribute("space");
-			const control_page_title = this.getAttribute("control_page_title");
-			const initial_height = this.getAttribute("initial_height");
-			let autoscroll = this.getAttribute("autoscroll");
 
-			let source = space
+			const source = host
+				? `https://${host}`
+				: space
 				? (
 						await (
 							await fetch(`https://huggingface.co/api/spaces/${space}/host`)
 						).json()
 				  ).host
 				: this.getAttribute("src");
+
+			const control_page_title = this.getAttribute("control_page_title");
+			const initial_height = this.getAttribute("initial_height");
+			let autoscroll = this.getAttribute("autoscroll");
 
 			const _autoscroll = autoscroll === "true" ? true : false;
 
@@ -253,6 +270,7 @@ function create_custom_element() {
 				mount_app(
 					{
 						...config,
+						theme: this.theme,
 						control_page_title:
 							control_page_title && control_page_title === "true" ? true : false
 					},
@@ -272,6 +290,9 @@ function create_custom_element() {
 async function unscoped_mount() {
 	const target = document.querySelector("#root")! as HTMLDivElement;
 	target.classList.add("gradio-container");
+	if (window.__gradio_mode__ !== "website") {
+		handle_darkmode(target);
+	}
 
 	window.__gradio_loader__[0] = new Loader({
 		target: target,
@@ -285,6 +306,56 @@ async function unscoped_mount() {
 
 	const config = await handle_config(target, null);
 	mount_app({ ...config, control_page_title: true }, false, target, 0);
+}
+
+function handle_darkmode(target: HTMLDivElement): string {
+	let url = new URL(window.location.toString());
+	let theme = "light";
+
+	const color_mode: "light" | "dark" | "system" | null = url.searchParams.get(
+		"__theme"
+	) as "light" | "dark" | "system" | null;
+
+	if (color_mode !== null) {
+		if (color_mode === "dark") {
+			theme = darkmode(target);
+		} else if (color_mode === "system") {
+			theme = use_system_theme(target);
+		}
+		// light is default, so we don't need to do anything else
+	} else if (url.searchParams.get("__dark-theme") === "true") {
+		theme = darkmode(target);
+	} else {
+		theme = use_system_theme(target);
+	}
+	return theme;
+}
+
+function use_system_theme(target: HTMLDivElement): string {
+	const theme = update_scheme();
+	window
+		?.matchMedia("(prefers-color-scheme: dark)")
+		?.addEventListener("change", update_scheme);
+
+	function update_scheme() {
+		let theme = "light";
+		const is_dark =
+			window?.matchMedia?.("(prefers-color-scheme: dark)").matches ?? null;
+
+		if (is_dark) {
+			theme = darkmode(target);
+		}
+		return theme;
+	}
+	return theme;
+}
+
+function darkmode(target: HTMLDivElement): string {
+	target.classList.add("dark");
+	if (app_mode) {
+		document.body.style.backgroundColor = "rgb(11, 15, 25)"; // bg-gray-950 for scrolling outside the body
+	}
+	return "dark";
 }
 
 // dev mode or if inside an iframe

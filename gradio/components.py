@@ -20,6 +20,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
+import altair as alt
 import matplotlib.figure
 import numpy as np
 import pandas as pd
@@ -27,6 +28,8 @@ import PIL
 import PIL.ImageOps
 from ffmpy import FFmpeg
 from markdown_it import MarkdownIt
+from mdit_py_plugins.dollarmath import dollarmath_plugin
+from pandas.api.types import is_numeric_dtype
 
 from gradio import media_data, processing_utils, utils
 from gradio.blocks import Block
@@ -101,14 +104,12 @@ class IOComponent(Component, Serializable):
         show_label: bool = True,
         interactive: Optional[bool] = None,
         visible: bool = True,
-        requires_permissions: bool = False,
         elem_id: Optional[str] = None,
         load_fn: Optional[Callable] = None,
         **kwargs,
     ):
         self.label = label
         self.show_label = show_label
-        self.requires_permissions = requires_permissions
         self.interactive = interactive
 
         load_fn, initial_value = self.get_load_fn_and_initial_value(value)
@@ -281,6 +282,7 @@ class Textbox(
         interactive: Optional[bool] = None,
         visible: bool = True,
         elem_id: Optional[str] = None,
+        type: str = "text",
         **kwargs,
     ):
         """
@@ -294,9 +296,14 @@ class Textbox(
             interactive: if True, will be rendered as an editable textbox; if False, editing will be disabled. If not provided, this is inferred based on whether the component is used as an input or output.
             visible: If False, component will be hidden.
             elem_id: An optional string that is assigned as the id of this component in the HTML DOM. Can be used for targeting CSS styles.
+            type: The type of textbox. One of: 'text', 'password', 'email', Default is 'text'.
         """
+        if type not in ["text", "password", "email"]:
+            raise ValueError('`type` must be one of "text", "password", or "email".')
+
+        #
         self.lines = lines
-        self.max_lines = max_lines
+        self.max_lines = max_lines if type == "text" else 1
         self.placeholder = placeholder
         self.interpret_by_tokens = True
         IOComponent.__init__(
@@ -311,6 +318,7 @@ class Textbox(
         )
         self.cleared_value = ""
         self.test_input = value
+        self.type = type
 
     def get_config(self):
         return {
@@ -318,6 +326,7 @@ class Textbox(
             "max_lines": self.max_lines,
             "placeholder": self.placeholder,
             "value": self.value,
+            "type": self.type,
             **IOComponent.get_config(self),
         }
 
@@ -331,6 +340,7 @@ class Textbox(
         show_label: Optional[bool] = None,
         visible: Optional[bool] = None,
         interactive: Optional[bool] = None,
+        type: Optional[str] = None,
     ):
         updated_config = {
             "lines": lines,
@@ -340,6 +350,7 @@ class Textbox(
             "show_label": show_label,
             "visible": visible,
             "value": value,
+            "type": type,
             "__type__": "update",
         }
         return IOComponent.add_interactive_to_config(updated_config, interactive)
@@ -351,7 +362,7 @@ class Textbox(
         """
         Preprocesses input (converts it to a string) before passing it to the function.
         Parameters:
-            x: sample input to preprocess.
+            x: text
         Returns:
             text
         """
@@ -1276,7 +1287,6 @@ class Image(
                 f"Invalid value for parameter `source`: {source}. Please choose from one of: {valid_sources}"
             )
         self.source = source
-        requires_permissions = source == "webcam"
         if tool is None:
             self.tool = "sketch" if source == "canvas" else "editor"
         else:
@@ -1295,7 +1305,6 @@ class Image(
             interactive=interactive,
             visible=visible,
             elem_id=elem_id,
-            requires_permissions=requires_permissions,
             value=value,
             **kwargs,
         )
@@ -1563,6 +1572,9 @@ class Image(
             postprocess=postprocess,
         )
 
+    def as_example(self, input_data: str | None) -> str:
+        return os.path.abspath(input_data)
+
 
 @document("change", "clear", "play", "pause", "stop", "style")
 class Video(Changeable, Clearable, Playable, Uploadable, IOComponent, FileSerializable):
@@ -1802,7 +1814,6 @@ class Audio(
                 f"Invalid value for parameter `source`: {source}. Please choose from one of: {valid_sources}"
             )
         self.source = source
-        requires_permissions = source == "microphone"
         valid_types = ["numpy", "filepath", "file"]
         if type not in valid_types:
             raise ValueError(
@@ -1823,7 +1834,6 @@ class Audio(
             interactive=interactive,
             visible=visible,
             elem_id=elem_id,
-            requires_permissions=requires_permissions,
             value=value,
             **kwargs,
         )
@@ -2076,6 +2086,7 @@ class File(Changeable, Clearable, Uploadable, IOComponent, FileSerializable):
         value: Optional[str | List[str] | Callable] = None,
         *,
         file_count: str = "single",
+        file_types: List[str] = None,
         type: str = "file",
         label: Optional[str] = None,
         show_label: bool = True,
@@ -2088,6 +2099,7 @@ class File(Changeable, Clearable, Uploadable, IOComponent, FileSerializable):
         Parameters:
             value: Default file to display, given as str file path. If callable, the function will be called whenever the app loads to set the initial value of the component.
             file_count: if single, allows user to upload one file. If "multiple", user uploads multiple files. If "directory", user uploads all files in selected directory. Return type will be list for each file in case of "multiple" or "directory".
+            file_types: List of type of files to be uploaded. "file" allows any file to be uploaded, "image" allows only image files to be uploaded, "audio" allows only audio files to be uploaded, "video" allows only video files to be uploaded, "text" allows only text files to be uploaded.
             type: Type of value to be returned by component. "file" returns a temporary file object whose path can be retrieved by file_obj.name and original filename can be retrieved with file_obj.orig_name, "binary" returns an bytes object.
             label: component name in interface.
             show_label: if True, will display label.
@@ -2097,10 +2109,19 @@ class File(Changeable, Clearable, Uploadable, IOComponent, FileSerializable):
         """
         self.temp_dir = tempfile.mkdtemp()
         self.file_count = file_count
-        valid_types = ["file", "binary"]
+        self.file_types = file_types
+        valid_types = [
+            "file",
+            "binary",
+            "bytes",
+        ]  # "bytes" is included for backwards compatibility
         if type not in valid_types:
             raise ValueError(
                 f"Invalid value for parameter `type`: {type}. Please choose from one of: {valid_types}"
+            )
+        if type == "bytes":
+            warnings.warn(
+                "The `bytes` type is deprecated and may not work as expected. Please use `binary` instead."
             )
         self.type = type
         self.test_input = None
@@ -2118,6 +2139,7 @@ class File(Changeable, Clearable, Uploadable, IOComponent, FileSerializable):
     def get_config(self):
         return {
             "file_count": self.file_count,
+            "file_types": self.file_types,
             "value": self.value,
             **IOComponent.get_config(self),
         }
@@ -2166,7 +2188,9 @@ class File(Changeable, Clearable, Uploadable, IOComponent, FileSerializable):
                     )
                     file.orig_name = file_name
                 return file
-            elif self.type == "bytes":
+            elif (
+                self.type == "binary" or self.type == "bytes"
+            ):  # "bytes" is included for backwards compatibility
                 if is_file:
                     with open(file_name, "rb") as file_data:
                         return file_data.read()
@@ -2425,7 +2449,7 @@ class Dataframe(Changeable, IOComponent, JSONSerializable):
         """
         if y is None:
             return self.postprocess(self.test_input)
-        if isinstance(y, Dict):
+        if isinstance(y, dict):
             return y
         if isinstance(y, str):
             y = pd.read_csv(y)
@@ -2486,7 +2510,11 @@ class Dataframe(Changeable, IOComponent, JSONSerializable):
             return data
 
         if cls.markdown_parser is None:
-            cls.markdown_parser = MarkdownIt().enable("table")
+            cls.markdown_parser = (
+                MarkdownIt()
+                .use(dollarmath_plugin, renderer=utils.tex2svg, allow_digits=False)
+                .enable("table")
+            )
 
         for i in range(len(data)):
             for j in range(len(data[i])):
@@ -2751,6 +2779,141 @@ class Button(Clickable, IOComponent, SimpleSerializable):
         return IOComponent.style(self, **kwargs)
 
 
+@document("click", "upload", "style")
+class UploadButton(Clickable, Uploadable, IOComponent, SimpleSerializable):
+    """
+    Used to create an upload button, when cicked allows a user to upload files that satisfy the specified file type or generic files (if file_type not set).
+    Preprocessing: passes the uploaded file as a {file-object} or {List[file-object]} depending on `file_count` (or a {bytes}/{List{bytes}} depending on `type`)
+    Postprocessing: expects function to return a {str} path to a file, or {List[str]} consisting of paths to files.
+    Examples-format: a {str} path to a local file that populates the component.
+    Demos: upload_button
+    """
+
+    def __init__(
+        self,
+        label: str = "Upload a File",
+        value: Optional[str | List[str] | Callable] = None,
+        *,
+        visible: bool = True,
+        elem_id: Optional[str] = None,
+        type: str = "file",
+        file_count: str = "single",
+        file_types: List[str] = None,
+        **kwargs,
+    ):
+        """
+        Parameters:
+            value: Default text for the button to display.
+            type: Type of value to be returned by component. "file" returns a temporary file object whose path can be retrieved by file_obj.name and original filename can be retrieved with file_obj.orig_name, "binary" returns an bytes object.
+            file_count: if single, allows user to upload one file. If "multiple", user uploads multiple files. If "directory", user uploads all files in selected directory. Return type will be list for each file in case of "multiple" or "directory".
+            file_types: List of type of files to be uploaded. "file" allows any file to be uploaded, "image" allows only image files to be uploaded, "audio" allows only audio files to be uploaded, "video" allows only video files to be uploaded, "text" allows only text files to be uploaded.
+            label: Text to display on the button. Defaults to "Upload a File".
+            visible: If False, component will be hidden.
+            elem_id: An optional string that is assigned as the id of this component in the HTML DOM. Can be used for targeting CSS styles.
+        """
+        self.temp_dir = tempfile.mkdtemp()
+        self.type = type
+        self.file_count = file_count
+        self.file_types = file_types
+        self.label = label
+        IOComponent.__init__(
+            self, label=label, visible=visible, elem_id=elem_id, value=value, **kwargs
+        )
+
+    def get_config(self):
+        return {
+            "label": self.label,
+            "value": self.value,
+            "file_count": self.file_count,
+            "file_types": self.file_types,
+            **Component.get_config(self),
+        }
+
+    @staticmethod
+    def update(
+        value: Optional[str] = _Keywords.NO_VALUE,
+        interactive: Optional[bool] = None,
+        visible: Optional[bool] = None,
+    ):
+        updated_config = {
+            "interactive": interactive,
+            "visible": visible,
+            "value": value,
+            "__type__": "update",
+        }
+        return IOComponent.add_interactive_to_config(updated_config, interactive)
+
+    def preprocess(self, x: List[Dict[str, str]] | None) -> str | List[str]:
+        """
+        Parameters:
+            x: List of JSON objects with filename as 'name' property and base64 data as 'data' property
+        Returns:
+            File objects in requested format
+        """
+        if x is None:
+            return None
+
+        def process_single_file(f):
+            file_name, data, is_file = (
+                f["name"],
+                f["data"],
+                f.get("is_file", False),
+            )
+            if self.type == "file":
+                if is_file:
+                    file = processing_utils.create_tmp_copy_of_file(
+                        file_name, dir=self.temp_dir
+                    )
+                    file.orig_name = file_name
+                else:
+                    file = processing_utils.decode_base64_to_file(
+                        data, file_path=file_name, dir=self.temp_dir
+                    )
+                    file.orig_name = file_name
+                return file
+            elif self.type == "bytes":
+                if is_file:
+                    with open(file_name, "rb") as file_data:
+                        return file_data.read()
+                return processing_utils.decode_base64_to_binary(data)[0]
+            else:
+                raise ValueError(
+                    "Unknown type: "
+                    + str(self.type)
+                    + ". Please choose from: 'file', 'bytes'."
+                )
+
+        if self.file_count == "single":
+            if isinstance(x, list):
+                return process_single_file(x[0])
+            else:
+                return process_single_file(x)
+        else:
+            if isinstance(x, list):
+                return [process_single_file(f) for f in x]
+            else:
+                return process_single_file(x)
+
+    def generate_sample(self):
+        return deepcopy(media_data.BASE64_FILE)
+
+    def serialize(self, x: str, load_dir: str = "", called_directly: bool = False):
+        serialized = FileSerializable.serialize(self, x, load_dir, called_directly)
+        serialized["size"] = os.path.getsize(serialized["name"])
+        return serialized
+
+    def style(self, *, full_width: Optional[bool] = None, **kwargs):
+        """
+        This method can be used to change the appearance of the button component.
+        Parameters:
+            full_width: If True, will expand to fill parent container.
+        """
+        if full_width is not None:
+            self._style["full_width"] = full_width
+
+        return IOComponent.style(self, **kwargs)
+
+
 @document("change", "submit", "style")
 class ColorPicker(Changeable, Submittable, IOComponent, SimpleSerializable):
     """
@@ -2874,6 +3037,7 @@ class Label(Changeable, IOComponent, JSONSerializable):
         show_label: bool = True,
         visible: bool = True,
         elem_id: Optional[str] = None,
+        color: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -2884,8 +3048,10 @@ class Label(Changeable, IOComponent, JSONSerializable):
             show_label: if True, will display label.
             visible: If False, component will be hidden.
             elem_id: An optional string that is assigned as the id of this component in the HTML DOM. Can be used for targeting CSS styles.
+            color: The background color of the label (either a valid css color name or hexadecimal string).
         """
         self.num_top_classes = num_top_classes
+        self.color = color
         IOComponent.__init__(
             self,
             label=label,
@@ -2900,6 +3066,7 @@ class Label(Changeable, IOComponent, JSONSerializable):
         return {
             "num_top_classes": self.num_top_classes,
             "value": self.value,
+            "color": self.color,
             **IOComponent.get_config(self),
         }
 
@@ -2941,12 +3108,24 @@ class Label(Changeable, IOComponent, JSONSerializable):
         label: Optional[str] = None,
         show_label: Optional[bool] = None,
         visible: Optional[bool] = None,
+        color: Optional[str] = _Keywords.NO_VALUE,
     ):
+        # If color is not specified (NO_VALUE) map it to None so that
+        # it gets filtered out in postprocess. This will mean the color
+        # will not be updated in the front-end
+        if color is _Keywords.NO_VALUE:
+            color = None
+        # If the color was specified by the developer as None
+        # Map is so that the color is updated to be transparent,
+        # e.g. no background default state.
+        elif color is None:
+            color = "transparent"
         updated_config = {
             "label": label,
             "show_label": show_label,
             "visible": visible,
             "value": value,
+            "color": color,
             "__type__": "update",
         }
         return updated_config
@@ -3090,6 +3269,10 @@ class HighlightedText(Changeable, IOComponent, JSONSerializable):
                     running_category = category
                 elif category == running_category:
                     running_text += self.adjacent_separator + text
+                elif not text:
+                    # Skip fully empty item, these get added in processing
+                    # of dictionaries.
+                    pass
                 else:
                     output.append((running_text, running_category))
                     running_text = text
@@ -3453,9 +3636,9 @@ class Carousel(IOComponent, Changeable, SimpleSerializable):
 @document("change", "style")
 class Chatbot(Changeable, IOComponent, JSONSerializable):
     """
-    Displays a chatbot output showing both user submitted messages and responses
+    Displays a chatbot output showing both user submitted messages and responses. Supports a subset of Markdown including bold, italics, code, and images.
     Preprocessing: this component does *not* accept input.
-    Postprocessing: expects a {List[Tuple[str, str]]}, a list of tuples with user inputs and responses.
+    Postprocessing: expects a {List[Tuple[str, str]]}, a list of tuples with user inputs and responses as strings of HTML.
 
     Demos: chatbot_demo
     """
@@ -3484,6 +3667,7 @@ class Chatbot(Changeable, IOComponent, JSONSerializable):
                 "The 'color_map' parameter has been moved from the constructor to `Chatbot.style()` ",
             )
         self.color_map = color_map
+        self.md = MarkdownIt()
 
         IOComponent.__init__(
             self,
@@ -3523,11 +3707,15 @@ class Chatbot(Changeable, IOComponent, JSONSerializable):
     def postprocess(self, y: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
         """
         Parameters:
-            y: List of tuples representing the message and response
+            y: List of tuples representing the message and response pairs. Each message and response should be a string, which may be in Markdown format.
         Returns:
-            List of tuples representing the message and response
+            List of tuples representing the message and response. Each message and response will be a string of HTML.
         """
-        return [] if y is None else y
+        if y is None:
+            return []
+        for i, (message, response) in enumerate(y):
+            y[i] = (self.md.render(message), self.md.render(response))
+        return y
 
     def style(self, *, color_map: Optional[List[str, str]] = None, **kwargs):
         """
@@ -3674,7 +3862,7 @@ class Plot(Changeable, Clearable, IOComponent, JSONSerializable):
     Preprocessing: this component does *not* accept input.
     Postprocessing: expects either a {matplotlib.figure.Figure}, a {plotly.graph_objects._figure.Figure}, or a {dict} corresponding to a bokeh plot (json_item format)
 
-    Demos: outbreak_forecast, blocks_kinematics, stock_forecast, map_airbnb
+    Demos: altair_plot, outbreak_forecast, blocks_kinematics, stock_forecast, map_airbnb
     Guides: plot_component_for_maps
     """
 
@@ -3690,7 +3878,7 @@ class Plot(Changeable, Clearable, IOComponent, JSONSerializable):
     ):
         """
         Parameters:
-            value: Optionally, supply a default plot object to display, must be a matplotlib, plotly, or bokeh figure. If callable, the function will be called whenever the app loads to set the initial value of the component.
+            value: Optionally, supply a default plot object to display, must be a matplotlib, plotly, altair, or bokeh figure. If callable, the function will be called whenever the app loads to set the initial value of the component.
             label: component name in interface.
             show_label: if True, will display label.
             visible: If False, component will be hidden.
@@ -3741,18 +3929,311 @@ class Plot(Changeable, Clearable, IOComponent, JSONSerializable):
             dtype = "bokeh"
             out_y = json.dumps(y)
         else:
-            dtype = "plotly"
+            is_altair = "altair" in y.__module__
+            if is_altair:
+                dtype = "altair"
+            else:
+                dtype = "plotly"
             out_y = y.to_json()
         return {"type": dtype, "plot": out_y}
 
-    def style(self):
-        return self
+    def style(self, container: Optional[bool] = None):
+        return IOComponent.style(
+            self,
+            container=container,
+        )
+
+
+@document("change", "clear")
+class ScatterPlot(Plot):
+    """
+    Create a scatter plot.
+
+    Preprocessing: this component does *not* accept input.
+    Postprocessing: expects a pandas dataframe with the data to plot.
+
+    Demos: native_plots
+    """
+
+    def __init__(
+        self,
+        value: Optional[pd.DataFrame | Callable] = None,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        *,
+        color: Optional[str] = None,
+        size: Optional[str] = None,
+        shape: Optional[str] = None,
+        title: Optional[str] = None,
+        tooltip: Optional[List[str] | str] = None,
+        x_title: Optional[str] = None,
+        y_title: Optional[str] = None,
+        color_legend_title: Optional[str] = None,
+        size_legend_title: Optional[str] = None,
+        shape_legend_title: Optional[str] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        caption: Optional[str] = None,
+        interactive: Optional[bool] = True,
+        label: Optional[str] = None,
+        show_label: bool = True,
+        visible: bool = True,
+        elem_id: Optional[str] = None,
+    ):
+        """
+        Parameters:
+            value: The pandas dataframe containing the data to display in a scatter plot.
+            x: Column corresponding to the x axis.
+            y: Column corresponding to the y axis.
+            color: The column to determine the point color. If the column contains numeric data, gradio will interpolate the column data so that small values correspond to light colors and large values correspond to dark values.
+            size: The column used to determine the point size. Should contain numeric data so that gradio can map the data to the point size.
+            shape: The column used to determine the point shape. Should contain categorical data. Gradio will map each unique value to a different shape.
+            title: The title to display on top of the chart.
+            tooltip: The column (or list of columns) to display on the tooltip when a user hovers a point on the plot.
+            x_title: The title given to the x axis. By default, uses the value of the x parameter.
+            y_title: The title given to the y axis. By default, uses the value of the y parameter.
+            color_legend_title: The title given to the color legend. By default, uses the value of color parameter.
+            size_legend_title: The title given to the size legend. By default, uses the value of the size parameter.
+            shape_legend_title: The title given to the shape legend. By default, uses the value of the shape parameter.
+            height: The height of the plot in pixels.
+            width: The width of the plot in pixels.
+            caption: The (optional) caption to display below the plot.
+            interactive: Whether users should be able to interact with the plot by panning or zooming with their mouse or trackpad.
+            label: The (optional) label to display on the top left corner of the plot.
+            show_label: Whether the label should be displayed.
+            visible: Whether the plot should be visible.
+            elem_id: Unique id used for custom css targetting.
+        """
+        self.x = x
+        self.y = y
+        self.color = color
+        self.size = size
+        self.shape = shape
+        self.tooltip = tooltip
+        self.title = title
+        self.x_title = x_title
+        self.y_title = y_title
+        self.color_legend_title = color_legend_title
+        self.size_legend_title = size_legend_title
+        self.shape_legend_title = shape_legend_title
+        self.caption = caption
+        self.interactive_chart = interactive
+        self.width = width
+        self.height = height
+        # self.value = None
+        # if value is not None:
+        #     self.value = self.postprocess(value)
+        super().__init__(
+            value=value,
+            label=label,
+            show_label=show_label,
+            visible=visible,
+            elem_id=elem_id,
+        )
+
+    def get_config(self):
+        config = super().get_config()
+        config["caption"] = self.caption
+        return config
+
+    def get_block_name(self) -> str:
+        return "plot"
+
+    @staticmethod
+    def update(
+        value: Optional[Any] = _Keywords.NO_VALUE,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+        color: Optional[str] = None,
+        size: Optional[str] = None,
+        shape: Optional[str] = None,
+        title: Optional[str] = None,
+        tooltip: Optional[List[str] | str] = None,
+        x_title: Optional[str] = None,
+        y_title: Optional[str] = None,
+        color_legend_title: Optional[str] = None,
+        size_legend_title: Optional[str] = None,
+        shape_legend_title: Optional[str] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        interactive: Optional[bool] = None,
+        caption: Optional[str] = None,
+        label: Optional[str] = None,
+        show_label: Optional[bool] = None,
+        visible: Optional[bool] = None,
+    ):
+        """Update an existing plot component.
+
+        If updating any of the plot properties (color, size, etc) the value, x, and y parameters must be specified.
+
+        Parameters:
+            value: The pandas dataframe containing the data to display in a scatter plot.
+            x: Column corresponding to the x axis.
+            y: Column corresponding to the y axis.
+            color: The column to determine the point color. If the column contains numeric data, gradio will interpolate the column data so that small values correspond to light colors and large values correspond to dark values.
+            size: The column used to determine the point size. Should contain numeric data so that gradio can map the data to the point size.
+            shape: The column used to determine the point shape. Should contain categorical data. Gradio will map each unique value to a different shape.
+            title: The title to display on top of the chart.
+            tooltip: The column (or list of columns) to display on the tooltip when a user hovers a point on the plot.
+            x_title: The title given to the x axis. By default, uses the value of the x parameter.
+            y_title: The title given to the y axis. By default, uses the value of the y parameter.
+            color_legend_title: The title given to the color legend. By default, uses the value of color parameter.
+            size_legend_title: The title given to the size legend. By default, uses the value of the size parameter.
+            shape_legend_title: The title given to the shape legend. By default, uses the value of the shape parameter.
+            height: The height of the plot in pixels.
+            width: The width of the plot in pixels.
+            caption: The (optional) caption to display below the plot.
+            interactive: Whether users should be able to interact with the plot by panning or zooming with their mouse or trackpad.
+            label: The (optional) label to display in the top left corner of the plot.
+            show_label: Whether the label should be displayed.
+            visible: Whether the plot should be visible.
+        """
+        properties = [
+            x,
+            y,
+            color,
+            size,
+            shape,
+            title,
+            tooltip,
+            x_title,
+            y_title,
+            color_legend_title,
+            size_legend_title,
+            shape_legend_title,
+            interactive,
+            height,
+            width,
+        ]
+        if any(properties):
+            if value is _Keywords.NO_VALUE:
+                raise ValueError(
+                    "In order to update plot properties the value parameter "
+                    "must be provided. Please pass a value parameter to "
+                    "gr.ScatterPlot.update."
+                )
+            if x is None or y is None:
+                raise ValueError(
+                    "In order to update plot properties, the x and y axis data "
+                    "must be specified. Please pass valid values for x an y to "
+                    "gr.ScatterPlot.update."
+                )
+            chart = ScatterPlot.create_plot(value, *properties)
+            value = {"type": "altair", "plot": chart.to_json(), "chart": "scatter"}
+
+        updated_config = {
+            "label": label,
+            "show_label": show_label,
+            "visible": visible,
+            "value": value,
+            "caption": caption,
+            "__type__": "update",
+        }
+        return updated_config
+
+    @staticmethod
+    def create_plot(
+        value: pd.DataFrame,
+        x: str,
+        y: str,
+        color: Optional[str] = None,
+        size: Optional[str] = None,
+        shape: Optional[str] = None,
+        title: Optional[str] = None,
+        tooltip: Optional[List[str] | str] = None,
+        x_title: Optional[str] = None,
+        y_title: Optional[str] = None,
+        color_legend_title: Optional[str] = None,
+        size_legend_title: Optional[str] = None,
+        shape_legend_title: Optional[str] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        interactive: Optional[bool] = True,
+    ):
+        """Helper for creating the scatter plot."""
+        interactive = True if interactive is None else interactive
+        encodings = dict(
+            x=alt.X(x, title=x_title or x),
+            y=alt.Y(y, title=y_title or y),
+        )
+        properties = {}
+        if title:
+            properties["title"] = title
+        if height:
+            properties["height"] = height
+        if width:
+            properties["width"] = width
+        if color:
+            if is_numeric_dtype(value[color]):
+                domain = [value[color].min(), value[color].max()]
+                range_ = [0, 1]
+                type_ = "quantitative"
+            else:
+                domain = value[color].unique().tolist()
+                range_ = list(range(len(domain)))
+                type_ = "nominal"
+
+            encodings["color"] = {
+                "field": color,
+                "type": type_,
+                "legend": {"title": color_legend_title or color},
+                "scale": {"domain": domain, "range": range_},
+            }
+        if tooltip:
+            encodings["tooltip"] = tooltip
+        if size:
+            encodings["size"] = {
+                "field": size,
+                "type": "quantitative" if is_numeric_dtype(value[size]) else "nominal",
+                "legend": {"title": size_legend_title or size},
+            }
+        if shape:
+            encodings["shape"] = {
+                "field": shape,
+                "type": "quantitative" if is_numeric_dtype(value[shape]) else "nominal",
+                "legend": {"title": shape_legend_title or shape},
+            }
+        chart = (
+            alt.Chart(value)
+            .mark_point()
+            .encode(**encodings)
+            .properties(background="transparent", **properties)
+        )
+        if interactive:
+            chart = chart.interactive()
+
+        return chart
+
+    def postprocess(self, y: pd.DataFrame | Dict | None) -> Dict[str, str] | None:
+        # if None or update
+        if y is None or isinstance(y, Dict):
+            return y
+        chart = self.create_plot(
+            value=y,
+            x=self.x,
+            y=self.y,
+            color=self.color,
+            size=self.size,
+            shape=self.shape,
+            title=self.title,
+            tooltip=self.tooltip,
+            x_title=self.x_title,
+            y_title=self.y_title,
+            color_legend_title=self.color_legend_title,
+            size_legend_title=self.size_legend_title,
+            shape_legend_title=self.size_legend_title,
+            interactive=self.interactive_chart,
+            height=self.height,
+            width=self.width,
+        )
+
+        return {"type": "altair", "plot": chart.to_json(), "chart": "scatter"}
 
 
 @document("change")
 class Markdown(IOComponent, Changeable, SimpleSerializable):
     """
-    Used to render arbitrary Markdown output.
+    Used to render arbitrary Markdown output. Can also render latex enclosed by dollar signs.
     Preprocessing: this component does *not* accept input.
     Postprocessing: expects a valid {str} that can be rendered as Markdown.
 
@@ -3774,7 +4255,11 @@ class Markdown(IOComponent, Changeable, SimpleSerializable):
             visible: If False, component will be hidden.
             elem_id: An optional string that is assigned as the id of this component in the HTML DOM. Can be used for targeting CSS styles.
         """
-        self.md = MarkdownIt().enable("table")
+        self.md = (
+            MarkdownIt()
+            .use(dollarmath_plugin, renderer=utils.tex2svg, allow_digits=False)
+            .enable("table")
+        )
         IOComponent.__init__(
             self, visible=visible, elem_id=elem_id, value=value, **kwargs
         )

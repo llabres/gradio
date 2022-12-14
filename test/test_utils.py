@@ -18,7 +18,7 @@ from gradio.test_data.blocks_configs import (
     XRAY_CONFIG_WITH_MISTAKE,
 )
 from gradio.utils import (
-    Request,
+    AsyncRequest,
     append_unique_suffix,
     assert_configs_are_equivalent_besides_ids,
     colab_check,
@@ -31,6 +31,8 @@ from gradio.utils import (
     readme_to_html,
     sanitize_list_for_csv,
     sanitize_value_for_csv,
+    strip_invalid_filename_characters,
+    validate_url,
     version_check,
 )
 
@@ -101,14 +103,12 @@ class TestUtils:
 
 
 class TestIPAddress:
+    @pytest.mark.flaky
     def test_get_ip(self):
         ip = get_local_ip_address()
         if ip == "No internet connection":
             return
-        try:  # check whether ip is valid
-            ipaddress.ip_address(ip)
-        except ValueError:
-            self.fail("Invalid IP address")
+        ipaddress.ip_address(ip)
 
     @mock.patch("requests.get")
     def test_get_ip_without_internet(self, mock_get):
@@ -255,15 +255,15 @@ async def client():
     A fixture to mock the async client object.
     """
     async with AsyncClient() as mock_client:
-        with mock.patch("gradio.utils.Request.client", mock_client):
+        with mock.patch("gradio.utils.AsyncRequest.client", mock_client):
             yield
 
 
 class TestRequest:
     @pytest.mark.asyncio
     async def test_get(self):
-        client_response: Request = await Request(
-            method=Request.Method.GET,
+        client_response: AsyncRequest = await AsyncRequest(
+            method=AsyncRequest.Method.GET,
             url="http://headers.jsontest.com/",
         )
         validated_data = client_response.get_validated_data()
@@ -272,8 +272,8 @@ class TestRequest:
 
     @pytest.mark.asyncio
     async def test_post(self):
-        client_response: Request = await Request(
-            method=Request.Method.POST,
+        client_response: AsyncRequest = await AsyncRequest(
+            method=AsyncRequest.Method.POST,
             url="https://reqres.in/api/users",
             json={"name": "morpheus", "job": "leader"},
         )
@@ -290,8 +290,8 @@ class TestRequest:
             id: str
             createdAt: str
 
-        client_response: Request = await Request(
-            method=Request.Method.POST,
+        client_response: AsyncRequest = await AsyncRequest(
+            method=AsyncRequest.Method.POST,
             url="https://reqres.in/api/users",
             json={"name": "morpheus", "job": "leader"},
             validation_model=TestModel,
@@ -304,8 +304,8 @@ class TestRequest:
             name: Literal["John"] = "John"
             job: str
 
-        client_response: Request = await Request(
-            method=Request.Method.POST,
+        client_response: AsyncRequest = await AsyncRequest(
+            method=AsyncRequest.Method.POST,
             url="https://reqres.in/api/users",
             json={"name": "morpheus", "job": "leader"},
             validation_model=TestModel,
@@ -329,8 +329,8 @@ async def test_get(respx_mock):
         make_mock_response({"Host": "headers.jsontest.com"})
     )
 
-    client_response: Request = await Request(
-        method=Request.Method.GET,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.GET,
         url=MOCK_REQUEST_URL,
     )
     validated_data = client_response.get_validated_data()
@@ -344,8 +344,8 @@ async def test_post(respx_mock):
     payload = {"name": "morpheus", "job": "leader"}
     respx_mock.post(MOCK_REQUEST_URL).mock(make_mock_response(payload))
 
-    client_response: Request = await Request(
-        method=Request.Method.POST,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.POST,
         url=MOCK_REQUEST_URL,
         json=payload,
     )
@@ -374,8 +374,8 @@ async def test_validate_with_model(respx_mock):
         id: str
         createdAt: str
 
-    client_response: Request = await Request(
-        method=Request.Method.POST,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.POST,
         url=MOCK_REQUEST_URL,
         json={"name": "morpheus", "job": "leader"},
         validation_model=TestModel,
@@ -386,14 +386,14 @@ async def test_validate_with_model(respx_mock):
 @pytest.mark.asyncio
 async def test_validate_and_fail_with_model(respx_mock):
     class TestModel(BaseModel):
-        name: Literal[str] = "John"
+        name: Literal["John"]
         job: str
 
     payload = {"name": "morpheus", "job": "leader"}
     respx_mock.post(MOCK_REQUEST_URL).mock(make_mock_response(payload))
 
-    client_response: Request = await Request(
-        method=Request.Method.POST,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.POST,
         url=MOCK_REQUEST_URL,
         json=payload,
         validation_model=TestModel,
@@ -404,7 +404,7 @@ async def test_validate_and_fail_with_model(respx_mock):
     assert isinstance(client_response.exception, Exception)
 
 
-@mock.patch("gradio.utils.Request._validate_response_data")
+@mock.patch("gradio.utils.AsyncRequest._validate_response_data")
 @pytest.mark.asyncio
 async def test_exception_type(validate_response_data, respx_mock):
     class ResponseValidationException(Exception):
@@ -414,8 +414,8 @@ async def test_exception_type(validate_response_data, respx_mock):
 
     respx_mock.get(MOCK_REQUEST_URL).mock(Response(201))
 
-    client_response: Request = await Request(
-        method=Request.Method.GET,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.GET,
         url=MOCK_REQUEST_URL,
         exception_type=ResponseValidationException,
     )
@@ -434,8 +434,8 @@ async def test_validate_with_function(respx_mock):
             return response
         raise Exception
 
-    client_response: Request = await Request(
-        method=Request.Method.POST,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.POST,
         url=MOCK_REQUEST_URL,
         json={"name": "morpheus", "job": "leader"},
         validation_function=has_name,
@@ -456,8 +456,8 @@ async def test_validate_and_fail_with_function(respx_mock):
 
     respx_mock.post(MOCK_REQUEST_URL).mock(make_mock_response({"name": "morpheus"}))
 
-    client_response: Request = await Request(
-        method=Request.Method.POST,
+    client_response: AsyncRequest = await AsyncRequest(
+        method=AsyncRequest.Method.POST,
         url=MOCK_REQUEST_URL,
         json={"name": "morpheus", "job": "leader"},
         validation_function=has_name,
@@ -488,6 +488,21 @@ class TestSanitizeForCSV:
         assert sanitize_list_for_csv([1, ["ab", "=de"]]) == [1, ["ab", "'=de"]]
 
 
+class TestValidateURL:
+    @pytest.mark.flaky
+    def test_valid_urls(self):
+        assert validate_url("https://www.gradio.app")
+        assert validate_url("http://gradio.dev")
+        assert validate_url(
+            "https://upload.wikimedia.org/wikipedia/commons/b/b0/Bengal_tiger_%28Panthera_tigris_tigris%29_female_3_crop.jpg"
+        )
+
+    def test_invalid_urls(self):
+        assert not (validate_url("C:/Users/"))
+        assert not (validate_url("C:\\Users\\"))
+        assert not (validate_url("/home/user"))
+
+
 class TestAppendUniqueSuffix:
     def test_no_suffix(self):
         name = "test"
@@ -503,3 +518,21 @@ class TestAppendUniqueSuffix:
         name = "test"
         list_of_names = ["test", "test_1", "test_2", "test_3"]
         assert append_unique_suffix(name, list_of_names) == "test_4"
+
+
+@pytest.mark.parametrize(
+    "orig_filename, new_filename",
+    [
+        ("abc", "abc"),
+        ("$$AAabc&3", "AAabc3"),
+        ("$$AAabc&3", "AAabc3"),
+        ("$$AAa..b-c&3_", "AAa..b-c3_"),
+        ("$$AAa..b-c&3_", "AAa..b-c3_"),
+        (
+            "ゆかりです｡私､こんなかわいい服は初めて着ました…｡なんだかうれしくって､楽しいです｡歌いたくなる気分って､初めてです｡これがｱｲﾄﾞﾙってことなのかもしれませんね",
+            "ゆかりです私こんなかわいい服は初めて着ましたなんだかうれしくって楽しいです歌いたくなる気分って初めてですこれがｱｲﾄﾞﾙってことなの",
+        ),
+    ],
+)
+def test_strip_invalid_filename_characters(orig_filename, new_filename):
+    assert strip_invalid_filename_characters(orig_filename) == new_filename

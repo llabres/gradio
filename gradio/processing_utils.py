@@ -31,8 +31,10 @@ with warnings.catch_warnings():
 
 def to_binary(x: str | Dict) -> bytes:
     """Converts a base64 string or dictionary to a binary string that can be sent in a POST."""
-    if isinstance(x, dict):
+    if isinstance(x, dict) and not x.get("data"):
         x = encode_url_or_file_to_base64(x["name"])
+    elif isinstance(x, dict) and x.get("data"):
+        x = x["data"]
     return base64.b64decode(x.split(",")[1])
 
 
@@ -271,6 +273,10 @@ def decode_base64_to_file(
         if "." in filename:
             prefix = filename[0 : filename.index(".")]
             extension = filename[filename.index(".") + 1 :]
+
+    if prefix is not None:
+        prefix = utils.strip_invalid_filename_characters(prefix)
+
     if extension is None:
         file_obj = tempfile.NamedTemporaryFile(delete=False, prefix=prefix, dir=dir)
     else:
